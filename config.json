@@ -1,0 +1,75 @@
+{
+  "apps": [
+    {
+      "id": "diario",
+      "name": "Diario Departamental",
+      "description": "Portal de noticias y avisos internos",
+      "color": "#3b82f6",
+      "url": "http://localhost:8181",
+      "autoStart": false,
+      "processes": [
+        {
+          "name": "API (3001)",
+          "cwd": "C:\\Saul Web\\Diario-api",
+          "cmd": "node",
+          "args": ["server.js"],
+          "env": { "PORT": "3001", "FRONTEND_URL": "http://localhost:8181" },
+          "startDelay": 0,
+          "autoRestart": true
+        },
+        {
+          "name": "Frontend (8181)",
+          "cwd": "C:\\Saul Web\\DiarioDepartamental",
+          "cmd": "npx",
+          "args": ["--yes", "serve", "-l", "8181", "."],
+          "startDelay": 3000,
+          "autoRestart": true
+        }
+      ]
+    },
+    {
+      "id": "incidencias",
+      "name": "App Incidencias",
+      "description": "Gestión y seguimiento de incidencias",
+      "color": "#a855f7",
+      "url": "http://localhost:3000",
+      "autoStart": false,
+      "processes": [
+        {
+          "name": "Next.js (3000)",
+          "cwd": "C:\\Saul Web\\APP incidencias\\AppIncidencias",
+          "cmd": "npm",
+          "args": ["run", "dev"],
+          "startDelay": 0,
+          "autoRestart": true
+        }
+      ]
+    },
+    {
+      "id": "sysops",
+      "name": "SysOps Hub",
+      "description": "Centro de operaciones de sistemas",
+      "color": "#10b981",
+      "url": "http://localhost:5173",
+      "autoStart": false,
+      "processes": [
+        {
+          "name": "Backend (3002)",
+          "cwd": "C:\\Saul Web\\SysOps App\\.claude\\worktrees\\kind-mestorf-1e8338\\backend",
+          "cmd": "npm",
+          "args": ["run", "dev"],
+          "startDelay": 0,
+          "autoRestart": true
+        },
+        {
+          "name": "Frontend (5173)",
+          "cwd": "C:\\Saul Web\\SysOps App\\.claude\\worktrees\\kind-mestorf-1e8338\\frontend",
+          "cmd": "npm",
+          "args": ["run", "dev"],
+          "startDelay": 3000,
+          "autoRestart": true
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "dev-launcher",
+  "version": "1.0.0",
+  "description": "Launcher for local dev projects",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
