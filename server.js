@@ -1,7 +1,8 @@
 const express = require("express");
-const { spawn } = require("child_process");
+const { spawn, execFile } = require("child_process");
 const path = require("path");
 const fs = require("fs");
+const net = require("net");
 
 const app = express();
 const PORT = 9000;
@@ -9,6 +10,81 @@ const config = JSON.parse(fs.readFileSync(path.join(__dirname, "config.json"), "
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function waitForPortFree(port, attempts, delayMs, done) {
+  const tryOnce = (left) => {
+    const server = net.createServer();
+    server.once("error", () => {
+      if (left <= 1) return done(false);
+      setTimeout(() => tryOnce(left - 1), delayMs);
+    });
+    server.once("listening", () => {
+      server.close(() => done(true));
+    });
+    // host undefined => let node choose, catches typical EADDRINUSE cases
+    server.listen(Number(port));
+  };
+  tryOnce(attempts);
+}
+
+function killPortListeners(port, done) {
+  const p = Number(port);
+  execFile("cmd", ["/c", "netstat -ano -p tcp"], { windowsHide: true, timeout: 4000 }, (err, stdout) => {
+    if (err) return done("netstat_error");
+    const lines = (stdout ?? "").toString().split(/\r?\n/);
+    const pids = new Set();
+    for (const line of lines) {
+      if (!line.includes(`:${p}`) || !line.includes("LISTENING")) continue;
+      const cols = line.trim().split(/\s+/);
+      const pid = cols[cols.length - 1];
+      if (pid && /^\d+$/.test(pid)) pids.add(pid);
+    }
+
+    if (pids.size === 0) return done("killed=0;still=0");
+
+    const pidList = [...pids];
+    let idx = 0;
+    const killNext = () => {
+      if (idx >= pidList.length) {
+        return setTimeout(() => {
+          const server = net.createServer();
+          server.once("error", () => done(`killed=${pidList.length};still=1`));
+          server.once("listening", () => server.close(() => done(`killed=${pidList.length};still=0`)));
+          server.listen(p, "0.0.0.0");
+        }, 250);
+      }
+      const pid = pidList[idx++];
+      execFile("taskkill", ["/PID", String(pid), "/F", "/T"], { windowsHide: true, timeout: 3000 }, () => killNext());
+    };
+    killNext();
+  });
+}
+
+function killNodeProcessesByCwd(cwd, done) {
+  const safeCwd = String(cwd).replace(/\\/g, "\\\\").replace(/'/g, "''");
+  const psCmd = [
+    "$killed=0;",
+    `$needle='${safeCwd}';`,
+    "Get-CimInstance Win32_Process -Filter \"name = 'node.exe'\" | ForEach-Object {",
+    "  $cmd = $_.CommandLine;",
+    "  if ($cmd -and $cmd -like ('*' + $needle + '*')) {",
+    "    try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; $killed++ } catch {}",
+    "  }",
+    "};",
+    "Write-Output (\"killed_cwd=\" + $killed);",
+  ].join(" ");
+
+  execFile(
+    "powershell",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", psCmd],
+    { windowsHide: true, timeout: 5000 },
+    (_err, stdout, stderr) => {
+      const out = (stdout ?? "").toString().trim();
+      const serr = (stderr ?? "").toString().trim();
+      done([out, serr].filter(Boolean).join(" | "));
+    },
+  );
+}
 
 function readDotEnv(cwd) {
   const envPath = path.join(cwd, ".env");
@@ -33,9 +109,10 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
 // ── State ─────────────────────────────────────────────────────────────────────
-// { appId: { procName: { proc, logs[], status, startedAt, restartCount, userStopped } } }
+// { appId: { procName: { proc, logs[], status, startedAt, restartCount, userStopped, retryTimer } } }
 const state = {};
 const sseClients = {};
+const appStartLocks = new Set();
 
 for (const app_ of config.apps) {
   state[app_.id] = {};
@@ -44,6 +121,7 @@ for (const app_ of config.apps) {
     state[app_.id][proc.name] = {
       proc: null, logs: [], status: "stopped",
       startedAt: null, restartCount: 0, userStopped: false,
+      retryTimer: null,
     };
   }
 }
@@ -98,7 +176,12 @@ const MAX_RETRIES = 3;
 
 function startProcess(appId, procCfg) {
   const ps = state[appId][procCfg.name];
-  if (ps.proc && ps.status !== "stopped") return;
+  // Hard guard against concurrent/double starts and delayed retry overlaps.
+  if (ps.status === "starting" || (ps.proc && ps.status !== "stopped")) return;
+  if (ps.retryTimer) {
+    clearTimeout(ps.retryTimer);
+    ps.retryTimer = null;
+  }
 
   ps.status = "starting";
   ps.userStopped = false;
@@ -107,32 +190,37 @@ function startProcess(appId, procCfg) {
   pushLog(appId, procCfg.name, `  Carpeta: ${procCfg.cwd}`);
 
   const dotEnvVars = readDotEnv(procCfg.cwd);
-  const proc = spawn(procCfg.cmd, procCfg.args, {
-    cwd: procCfg.cwd, shell: true,
-    env: { ...process.env, ...dotEnvVars, ...(procCfg.env ?? {}) },
-  });
+  const launch = () => {
+    const proc = spawn(procCfg.cmd, procCfg.args, {
+      cwd: procCfg.cwd, shell: true,
+      env: { ...process.env, ...dotEnvVars, ...(procCfg.env ?? {}) },
+    });
 
-  ps.proc = proc;
+    ps.proc = proc;
 
-  proc.stdout.on("data", d => {
-    for (const line of d.toString().split("\n"))
-      if (line.trim()) pushLog(appId, procCfg.name, line);
-  });
-  proc.stderr.on("data", d => {
-    for (const line of d.toString().split("\n"))
-      if (line.trim()) pushLog(appId, procCfg.name, line);
-  });
+    proc.stdout.on("data", d => {
+      for (const line of d.toString().split("\n"))
+        if (line.trim()) pushLog(appId, procCfg.name, line);
+    });
+    proc.stderr.on("data", d => {
+      for (const line of d.toString().split("\n"))
+        if (line.trim()) pushLog(appId, procCfg.name, line);
+    });
 
-  proc.on("spawn", () => {
-    ps.status    = "running";
-    ps.startedAt = Date.now();
-    ps.restartCount = 0;
-    broadcastStatus(appId);
-    pushLog(appId, procCfg.name, `✓ Proceso iniciado (PID ${proc.pid})`);
-    broadcast(appId, { type: "proc_started", proc: procCfg.name });
-  });
+    proc.on("spawn", () => {
+      if (ps.retryTimer) {
+        clearTimeout(ps.retryTimer);
+        ps.retryTimer = null;
+      }
+      ps.status    = "running";
+      ps.startedAt = Date.now();
+      ps.restartCount = 0;
+      broadcastStatus(appId);
+      pushLog(appId, procCfg.name, `✓ Proceso iniciado (PID ${proc.pid})`);
+      broadcast(appId, { type: "proc_started", proc: procCfg.name });
+    });
 
-  proc.on("close", code => {
+    proc.on("close", code => {
     const wasUserStopped = ps.userStopped;
     ps.proc       = null;
     ps.startedAt  = null;
@@ -154,7 +242,10 @@ function startProcess(appId, procCfg) {
       pushLog(appId, procCfg.name,
         `⟳ Auto-reinicio en ${delay / 1000}s (intento ${ps.restartCount}/${MAX_RETRIES})…`);
       broadcast(appId, { type: "crashed", proc: procCfg.name, restarting: true, retryIn: delay });
-      setTimeout(() => startProcess(appId, procCfg), delay);
+      ps.retryTimer = setTimeout(() => {
+        ps.retryTimer = null;
+        startProcess(appId, procCfg);
+      }, delay);
     } else {
       if (canRetry && ps.restartCount >= MAX_RETRIES) {
         pushLog(appId, procCfg.name,
@@ -167,23 +258,65 @@ function startProcess(appId, procCfg) {
         broadcast(appId, { type: "crashed", proc: procCfg.name, restarting: false });
       }
     }
-  });
+    });
 
-  proc.on("error", err => {
-    ps.proc      = null;
-    ps.startedAt = null;
-    ps.status    = "stopped";
-    broadcastStatus(appId);
-    pushLog(appId, procCfg.name, `✗ Error: ${err.message}`);
-  });
+    proc.on("error", err => {
+      ps.proc      = null;
+      ps.startedAt = null;
+      ps.status    = "stopped";
+      broadcastStatus(appId);
+      pushLog(appId, procCfg.name, `✗ Error: ${err.message}`);
+    });
+  };
+
+  // Optional: free TCP port before starting process (async to avoid blocking API).
+  if (procCfg.preKillPort) {
+    killPortListeners(procCfg.preKillPort, (portOutcome) => {
+      if (portOutcome) pushLog(appId, procCfg.name, `  Pre-start port ${procCfg.preKillPort}: ${portOutcome}`);
+
+      // Extra cleanup: kill stale node processes tied to this process cwd.
+      killNodeProcessesByCwd(procCfg.cwd, (cwdOutcome) => {
+        if (cwdOutcome) pushLog(appId, procCfg.name, `  Pre-start cwd cleanup: ${cwdOutcome}`);
+
+        waitForPortFree(procCfg.preKillPort, 8, 500, (free) => {
+          if (!free) {
+            pushLog(appId, procCfg.name, `  Pre-start warning: port ${procCfg.preKillPort} still busy`);
+            ps.status = "starting";
+            broadcastStatus(appId);
+            ps.retryTimer = setTimeout(() => {
+              ps.retryTimer = null;
+              startProcess(appId, procCfg);
+            }, 2000);
+            return;
+          }
+          launch();
+        });
+      });
+    });
+  } else {
+    launch();
+  }
 }
 
 // ── Stop a process ────────────────────────────────────────────────────────────
 function stopProcess(appId, procName) {
   const ps = state[appId][procName];
-  if (!ps.proc) return;
+  const appCfg = config.apps.find(a => a.id === appId);
+  const procCfg = appCfg?.processes.find(p => p.name === procName);
+  if (ps.retryTimer) {
+    clearTimeout(ps.retryTimer);
+    ps.retryTimer = null;
+  }
+
+  if (!ps.proc && !procCfg?.preKillPort) return;
   ps.userStopped = true;
   pushLog(appId, procName, "■ Deteniendo proceso...");
+  if (procCfg?.preKillPort) {
+    killPortListeners(procCfg.preKillPort, (outcome) => {
+      if (outcome) pushLog(appId, procName, `  Stop port ${procCfg.preKillPort}: ${outcome}`);
+    });
+  }
+  if (!ps.proc) return;
   try {
     spawn("taskkill", ["/pid", String(ps.proc.pid), "/f", "/t"], { shell: true });
   } catch {
@@ -193,11 +326,14 @@ function stopProcess(appId, procName) {
 
 // ── Start app (sequential, respeta startDelay) ────────────────────────────────
 async function startApp(appCfg) {
+  if (appStartLocks.has(appCfg.id)) return;
+  appStartLocks.add(appCfg.id);
   for (const proc of appCfg.processes) {
     startProcess(appCfg.id, proc);
     const delay = proc.startDelay ?? 0;
     if (delay > 0) await sleep(delay);
   }
+  appStartLocks.delete(appCfg.id);
 }
 
 // ── API ───────────────────────────────────────────────────────────────────────
@@ -207,6 +343,7 @@ app.get("/api/status",  (_req, res) => res.json(getFullStatus()));
 app.post("/api/apps/:id/start", (req, res) => {
   const appCfg = config.apps.find(a => a.id === req.params.id);
   if (!appCfg) return res.status(404).json({ error: "App not found" });
+  if (getAppStatus(appCfg.id) === "starting") return res.json({ ok: true, ignored: "already_starting" });
   startApp(appCfg); // fire-and-forget, delays corren en background
   res.json({ ok: true });
 });

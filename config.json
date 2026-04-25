@@ -50,22 +50,25 @@
       "name": "SysOps Hub",
       "description": "Centro de operaciones de sistemas",
       "color": "#10b981",
-      "url": "http://localhost:5173",
+      "url": "http://localhost:5183",
       "autoStart": false,
       "processes": [
         {
-          "name": "Backend (3002)",
-          "cwd": "C:\\Saul Web\\SysOps App\\.claude\\worktrees\\kind-mestorf-1e8338\\backend",
+          "name": "Backend (3012)",
+          "cwd": "C:\\Saul Web\\SysOps App\\backend",
           "cmd": "npm",
           "args": ["run", "dev"],
+          "env": { "PORT": "3012", "FRONTEND_URL": "http://localhost:5183" },
+          "preKillPort": 3012,
           "startDelay": 0,
           "autoRestart": true
         },
         {
-          "name": "Frontend (5173)",
-          "cwd": "C:\\Saul Web\\SysOps App\\.claude\\worktrees\\kind-mestorf-1e8338\\frontend",
+          "name": "Frontend (5183)",
+          "cwd": "C:\\Saul Web\\SysOps App\\frontend",
           "cmd": "npm",
           "args": ["run", "dev"],
+          "preKillPort": 5183,
           "startDelay": 3000,
           "autoRestart": true
         }
