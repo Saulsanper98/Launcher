@@ -14,6 +14,7 @@
           "cmd": "node",
           "args": ["server.js"],
           "env": { "PORT": "3001", "FRONTEND_URL": "http://localhost:8181" },
+          "preKillPort": 3001,
           "startDelay": 0,
           "autoRestart": true
         },
@@ -22,6 +23,7 @@
           "cwd": "C:\\Saul Web\\DiarioDepartamental",
           "cmd": "npx",
           "args": ["--yes", "serve", "-l", "8181", "."],
+          "preKillPort": 8181,
           "startDelay": 3000,
           "autoRestart": true
         }
@@ -32,14 +34,36 @@
       "name": "App Incidencias",
       "description": "Gestión y seguimiento de incidencias",
       "color": "#a855f7",
+      "url": "http://localhost:3010",
+      "autoStart": false,
+      "processes": [
+        {
+          "name": "Next.js (3010)",
+          "cwd": "C:\\Saul Web\\APP incidencias\\AppIncidencias",
+          "cmd": "npm",
+          "args": ["run", "dev"],
+          "env": { "PORT": "3010" },
+          "preKillPort": 3010,
+          "startDelay": 0,
+          "autoRestart": true
+        }
+      ]
+    },
+    {
+      "id": "newdiario",
+      "name": "NewDiario",
+      "description": "Diario operativo; el login usa Postgres en 127.0.0.1:5433 (Docker Compose del repo, ver README)",
+      "color": "#f97316",
       "url": "http://localhost:3000",
       "autoStart": false,
       "processes": [
         {
           "name": "Next.js (3000)",
-          "cwd": "C:\\Saul Web\\APP incidencias\\AppIncidencias",
+          "cwd": "C:\\Saul Web\\NewDiario\\NewDiario",
           "cmd": "npm",
           "args": ["run", "dev"],
+          "env": { "PORT": "3000" },
+          "preKillPort": 3000,
           "startDelay": 0,
           "autoRestart": true
         }

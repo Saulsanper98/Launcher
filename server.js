@@ -311,16 +311,29 @@ function stopProcess(appId, procName) {
   if (!ps.proc && !procCfg?.preKillPort) return;
   ps.userStopped = true;
   pushLog(appId, procName, "■ Deteniendo proceso...");
+  if (ps.proc) {
+    try {
+      spawn("taskkill", ["/pid", String(ps.proc.pid), "/f", "/t"], { shell: true, windowsHide: true });
+    } catch {
+      try {
+        ps.proc.kill("SIGTERM");
+      } catch {}
+    }
+  }
+  // Misma limpieza que al arrancar SysOps: liberar puerto y nodos huérfanos del cwd.
   if (procCfg?.preKillPort) {
     killPortListeners(procCfg.preKillPort, (outcome) => {
       if (outcome) pushLog(appId, procName, `  Stop port ${procCfg.preKillPort}: ${outcome}`);
+      if (procCfg.cwd) {
+        killNodeProcessesByCwd(procCfg.cwd, (cwdOutcome) => {
+          if (cwdOutcome) pushLog(appId, procName, `  Stop cwd cleanup: ${cwdOutcome}`);
+        });
+      }
     });
-  }
-  if (!ps.proc) return;
-  try {
-    spawn("taskkill", ["/pid", String(ps.proc.pid), "/f", "/t"], { shell: true });
-  } catch {
-    ps.proc.kill("SIGTERM");
+  } else if (procCfg?.cwd && ps.proc) {
+    killNodeProcessesByCwd(procCfg.cwd, (cwdOutcome) => {
+      if (cwdOutcome) pushLog(appId, procName, `  Stop cwd cleanup: ${cwdOutcome}`);
+    });
   }
 }
 
